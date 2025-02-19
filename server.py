@@ -80,6 +80,13 @@ async def get_order_status(token_id: str):
         raise HTTPException(status_code=404, detail=f"Order with token_id '{token_id}' not found")
     return order.dict()
 
+@app.get("/exchanges/{exchange}/pairs")
+async def get_trading_pairs(exchange: str):
+    if exchange not in TRADING_PAIRS:
+        raise HTTPException(status_code=404, detail=f"Exchange '{exchange}' not found")
+
+    return {"exchange": exchange, "pairs": TRADING_PAIRS[exchange]}
+
 @app.post("/orders/twap", dependencies=[Depends(get_auth_token)])
 async def submit_twap_order(order_data: OrderBase, execution_time: int = 600, interval: int = 60):
     if order_data.exchange not in SUPPORTED_EXCHANGES:
