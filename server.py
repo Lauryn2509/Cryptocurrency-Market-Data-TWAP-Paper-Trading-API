@@ -1,21 +1,27 @@
-"""
-Crypto Trading API - Server
-Manages real market data, TWAP execution, and WebSocket price updates.
-"""
-
-from fastapi import FastAPI, HTTPException, Query, Depends, Header, WebSocket
+##################################################################################################
+# Librairies
+##################################################################################################
+from fastapi import FastAPI, HTTPException, Depends, Request, Header, WebSocket
+from fastapi.responses import JSONResponse
+from fastapi.security.api_key import APIKeyHeader
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import logging 
 import asyncio
 import json
 import websockets
-import requests
 from pydantic import BaseModel, validator
-from typing import List, Optional
+from typing import Dict, Optional
 
-# Initialisation du serveur FastAPI
+##################################################################################################
+# FastAPI server initialisation
+##################################################################################################
 app = FastAPI(
     title = "TWAP Paper trading API using Binance or Kraken cryptocurrencies market data",
-    description="""
-     API for TWAP (Time-Weighted Average Price) paper trading on the cryptocurrency market.
+    description=
+    """
+    API for TWAP (Time-Weighted Average Price) paper trading on the cryptocurrency market.
 
     # 1. What are TWAP Orders ?
     TWAP orders execute large volumes by dividing them over a specified period to minimize market impact (slipping).
@@ -32,53 +38,85 @@ app = FastAPI(
     - Uses an authentication token to access protected endpoints.
 
     # 5. Key Endpoints :
-    - `GET /exchanges`: List of supported exchanges.
-    - `GET /orders`: List all orders (requires authentication).
-    - `GET /orders/{token_id}`: Status of a specific order.
-    - `GET /exchanges/{exchange}/pairs`: Trading pairs for an exchange.
-    - `POST /orders/twap`: Submit a TWAP order.
+    - GET /exchanges: List of supported exchanges.
+    - GET /orders: List all orders (requires authentication).
+    - GET /orders/{token_id}: Status of a specific order.
+    - GET /exchanges/{exchange}/pairs: Trading pairs for an exchange.
+    - POST /orders/twap: Submit a TWAP order.
 
     # 6. Usage :
     - Simulates trading without risking real capital, ideal for testing strategies.
     """,
     version = "1.0.0",
     contact = {
-        "name": "Giovanni MANCHE",
+        "name": "Tania ADMANE, Antonin DEVALLAND, Fanny GAUDUCHEAU, Lauryn LETACONNOUX, Giovanni MANCHE, \
+            Cherine RHELLAB, Ariane TRUSSANT",
         "email": "giovanni.manche@dauphine.eu"},
-        license_info={"name": "MIT"})
+        license_info={"name": "MIT"}
+)
 
-# Exchanges et paires supportés
-SUPPORTED_EXCHANGES = ["binance", "kraken"]
-TRADING_PAIRS = {
-    "binance": ["BTCUSDT", "ETHUSDT"],
-    "kraken": ["XBT/USD", "ETH/USD"]  
+##################################################################################################
+# API Key configuaration - authentication
+##################################################################################################
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+# Clés API et leurs infos (pour l'exemple, seules les clés sont utilisées pour l'identification)
+API_KEYS: Dict[str, Dict] = {
+    "TaniaEstKo": {
+        "client_name": "default_client",
+        # Les paramètres de rate limit custom ne sont plus utilisés ici
+    },
+    # D'autres clés peuvent être ajoutées
 }
 
-
-# Stockage des carnets d'ordres en temps réel
-ORDER_BOOKS = {
-    "BTCUSDT": {"ask_price": 0.0, "bid_price": 0.0},
-    "ETHUSDT": {"ask_price": 0.0, "bid_price": 0.0},
-    "XBT/USD": {"ask_price": 0.0, "bid_price": 0.0},
-    "ETH/USD": {"ask_price": 0.0, "bid_price": 0.0}
-}
-
-# Authentification
 AUTH_TOKEN = "TaniaEstKo"
 
-def get_auth_token(x_token: str = Header(...)):
+def get_auth_token(x_token: str = Header(...)) -> str:
     if x_token != AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return x_token
 
-# Modèles d'ordres
+##################################################################################################
+# Rate limiting using SlowAPI
+##################################################################################################
+def custom_rate_limit_key(request: Request) -> str:
+    api_key = request.headers.get(API_KEY_NAME)
+    if api_key and api_key in API_KEYS:
+        return f"apikey_{api_key}"
+    return request.client.host
+
+limiter = Limiter(key_func=custom_rate_limit_key)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+##################################################################################################
+# Exchanges configuration 
+##################################################################################################
+SUPPORTED_EXCHANGES = ["binance", "kraken"]
+TRADING_PAIRS = {
+    "binance": ["BTCUSDT", "ETHUSDT"],
+    "kraken": ["XBTUSD", "ETHUSD"]
+}
+
+# Real-time trading books
+ORDER_BOOKS = {
+    "BTCUSDT": {"ask_price": 0.0, "bid_price": 0.0},
+    "ETHUSDT": {"ask_price": 0.0, "bid_price": 0.0},
+    "XBTUSD": {"ask_price": 0.0, "bid_price": 0.0},
+    "ETHUSD": {"ask_price": 0.0, "bid_price": 0.0}
+}
+
+##################################################################################################
+# Order models 
+##################################################################################################
 class OrderBase(BaseModel):
     token_id: str
     exchange: str
     symbol: str
     quantity: float
     price: float
-    order_type: str 
+    order_type: str
 
     @validator('order_type')
     def validate_order_type(cls, v):
@@ -91,23 +129,147 @@ class Order(OrderBase):
     executed_quantity: float = 0.0
     executions: list = []
 
-ORDERS = []
-connected_clients = []
+ORDERS = []  # Saved orders list
+connected_clients = []  # Websocket connected clients
 
-# Les endpoints REST restent les mêmes...
+##################################################################################################
+# API endpoints
+##################################################################################################
+@app.get("/",
+         tags = ['General'],
+         summary = "API Root",
+         description= "Returns a simple welcome message to confirm the API is running")
+@limiter.limit("20/minute")  # 20 requests per minute are allowed
+async def root(request: Request):
+    return {"message": "272 API"}
 
-### **WEBSOCKET PRICE UPDATES** ###
 
-async def send_order_book_update():
-    data = {"order_book": ORDER_BOOKS}
-    for client in connected_clients:
-        try:
-            await client.send_json(data)
-        except:
-            connected_clients.remove(client)
+@app.get("/exchanges",
+         tags = ["Exchanges"],
+         summary = "List supported exchanges")
+@limiter.limit("15/minute") # 15 requests per minute are allowed
+async def get_exchanges(request: Request):
+    return {"exchanges": SUPPORTED_EXCHANGES}
+
+@app.get("/exchanges/{exchange}/pairs",
+         tags = ["Exchanges"],
+         summary = "Retrieve trading pairs for a given exchange",
+          responses={
+            200: {
+                "description": "Successful response",
+                "content": {"application/json": {"example": {"exchange": "binance", "pairs": ["BTCUSDT", "ETHUSDT"]}}}
+            },
+            404: {
+                "description": "Exchange not found",
+                "content": {"application/json": {"example": {"detail": "Exchange 'unknown' not found"}}}
+            }})
+@limiter.limit("15/minute") # 15 requests per minute are allowed
+async def get_trading_pairs(exchange: str, request: Request):
+    if exchange not in SUPPORTED_EXCHANGES:
+        raise HTTPException(status_code=404, detail=f"Exchange '{exchange}' not found")
+    return {"pairs": TRADING_PAIRS[exchange]}
+
+@app.get("/orders", 
+         dependencies=[Depends(get_auth_token)],
+         tags = ["Orders"],
+         summary = "List all orders", 
+         description = """
+            Retrives all orders, with optional filtering by token_id.
+        """,
+        responses={
+        200: {
+            "description": "Returns the list of orders",
+            "content": {"application/json": {"example": {"orders": [{"token_id": "twap_btc", "status": "open"}]}}}
+        },
+        401: {
+            "description": "Unauthorized",
+            "content": {"application/json": {"example": {"detail": "Unauthorized"}}}
+        }   
+        })
+@limiter.limit("10/minute") # 15 requests per minute are allowed
+async def list_orders(request: Request, token_id: Optional[str] = None):
+    filtered_orders = [order for order in ORDERS if not token_id or order.token_id == token_id]
+    return {"orders": filtered_orders}
+
+@app.get(
+    "/orders/{token_id}",
+    dependencies=[Depends(get_auth_token)],
+    tags=["Orders"],
+    summary="Get order status",
+    description="""
+    Retrieves the status of a specific order based on the token_id.
+
+    - token_id : Unique identifier of the order.
+    - Returns : Order details including execution status.
+    """,
+    responses={
+        200: {
+            "description": "Successful response",
+            "content": {"application/json": {"example": {"token_id": "twap_btc", "status": "completed"}}}
+        },
+        404: {
+            "description": "Order not found",
+            "content": {"application/json": {"example": {"detail": "Order with token_id 'twap_btc' not found"}}}
+        }
+    }
+)
+@limiter.limit("10/minute") # 10 requests per minute are allowed
+async def get_order_status(token_id: str, request: Request):
+    order = next((order for order in ORDERS if order.token_id == token_id), None)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order with token_id '{token_id}' not found")
+    return order.dict()
+
+@app.post(
+    "/orders/twap",
+    dependencies=[Depends(get_auth_token)],
+    tags=["Orders"],
+    summary="Submit a TWAP order",
+    description="""
+    Submits a TWAP (Time-Weighted Average Price) order to be executed over a given time.
+
+    - order_data : Contains details such as symbol, quantity, price, and order type.
+    - execution_time : Total duration for TWAP execution (default: 600s).
+    - interval : Interval between partial executions (default: 60s).
+    """,
+    responses={
+        201: {
+            "description": "TWAP order accepted",
+            "content": {"application/json": {"example": {"message": "TWAP order accepted", "order_id": "twap_btc"}}}
+        },
+        400: {
+            "description": "Invalid order request",
+            "content": {"application/json": {"example": {"detail": "Symbol 'XYZUSD' not supported"}}}
+        },
+        401: {
+            "description": "Unauthorized",
+            "content": {"application/json": {"example": {"detail": "Unauthorized"}}}
+        }
+    }
+)
+@limiter.limit("10/minute") # 10 requests per minute are allowed
+async def submit_twap_order(order_data: OrderBase, request: Request, execution_time: int = 600, interval: int = 60) -> dict:
+    if order_data.exchange not in SUPPORTED_EXCHANGES:
+        raise HTTPException(status_code=400, detail=f"Exchange '{order_data.exchange}' not supported")
+    if order_data.symbol not in TRADING_PAIRS[order_data.exchange]:
+        raise HTTPException(status_code=400, detail=f"Symbol '{order_data.symbol}' not supported")
+
+    order = Order(**order_data.dict())
+    ORDERS.append(order)
+
+    asyncio.create_task(execute_twap_order(order, execution_time, interval))
+
+    return {"message": "TWAP order accepted", "order_id": order.token_id, "order_details": order.dict()}
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+@limiter.limit("15/minute")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """
+    Establishes a WebSocket connection to receive real-time updates of the order book. It :
+    - Accepts the WebSocket connection.
+    - Adds the client to the list of connected clients.
+    - Continuously sends the latest order book updates every second.
+    """
     await websocket.accept()
     connected_clients.append(websocket)
 
@@ -118,65 +280,115 @@ async def websocket_endpoint(websocket: WebSocket):
     except:
         connected_clients.remove(websocket)
 
-### **MARKET DATA COLLECTION** ###
+##################################################################################################
+# TWAP execution engine 
+##################################################################################################
+async def execute_twap_order(order: Order, execution_time: int, interval: int) -> None:
+    number_of_steps = execution_time // interval   # Number of steps = orders to be submitted
+    quantity_per_step = order.quantity / number_of_steps # Quantity per order
 
-async def fetch_binance_market_data():
-    while True:
+    for step in range(number_of_steps):
+        # We wait for the specified interval before processing the next execution step
+        await asyncio.sleep(interval)
+
+        # Current market price 
+        market_price = ORDER_BOOKS[order.symbol]["ask_price"] if order.order_type == "buy" else ORDER_BOOKS[order.symbol]["bid_price"]
+        logging.debug(f"TWAP - Step {step+1}: Market Price = {market_price}, Order Price = {order.price}")
+
+        # Order execution (agressive order is supposed)
+        # At each time we update the information about the total order
+        if (order.order_type == "buy" and market_price <= order.price) or (order.order_type == "sell" and market_price >= order.price):
+            order.executed_quantity += quantity_per_step
+            order.executions.append({"step": step + 1, "price": market_price, "quantity": quantity_per_step})
+            logging.debug(f"TWAP exécuté - Step {step+1}: {quantity_per_step} exécuté à {market_price}")
+        else:
+            logging.debug(f"TWAP NON exécuté - Prix marché ({market_price}) > {order.price}")
+
+    order.status = "completed" if order.executed_quantity >= order.quantity else "partial"
+
+##################################################################################################
+# WebSocket price update
+##################################################################################################
+
+async def send_order_book_update() -> None:
+    """
+    Function that aims to diffuse the trading book updates
+    """
+    data = {"order_book": ORDER_BOOKS}
+    for client in connected_clients:
         try:
-            async with websockets.connect("wss://stream.binance.com:9443/ws/btcusdt@bookTicker/ethusdt@bookTicker") as ws:
-                while True:
-                    response = await ws.recv()
-                    data = json.loads(response)
-                    symbol = data["s"]
-                    ORDER_BOOKS[symbol] = {"bid_price": float(data["b"]), "ask_price": float(data["a"])}
-                    await send_order_book_update()
+            await client.send_json(data)
         except:
-            await asyncio.sleep(5)
+            connected_clients.remove(client)
 
-async def fetch_kraken_market_data():
+
+
+async def fetch_market_data() -> None:
+    """
+    Function that continuously fetch market data from Binance and Kraken
+    Connection via Websocket
+    """
     while True:
         try:
-            async with websockets.connect("wss://ws.kraken.com") as ws:
-                # Subscribe to XBT/USD and ETH/USD book
-                subscribe_message = {
-                    "event": "subscribe",
-                    "pair": ["XBT/USD", "ETH/USD"],
-                    "subscription": {
-                        "name": "book",
-                        "depth": 1
-                    }
-                }
-                await ws.send(json.dumps(subscribe_message))
+            # Websocket connection to Binance (for BTCUSDT and ETHUSDT pairs)
+            async with websockets.connect("wss://stream.binance.com:9443/ws/btcusdt@bookTicker/ethusdt@bookTicker") as ws_binance:
+                # Websocket connection to Kraken (for XBTUSD and ETHUSD pairs)
+                async with websockets.connect("wss://ws.kraken.com/") as ws_kraken:
+                    await ws_kraken.send(json.dumps({
+                        "event": "subscribe",
+                        "pair": ["XBT/USD", "ETH/USD"],
+                        "subscription": {"name": "ticker"}
+                    }))
+                    
+                    # loop to continuously receive data
+                    while True:
+                        binance_response = await ws_binance.recv()
+                        kraken_response = await ws_kraken.recv()
+                    
+                        # Passign the responses as JSON
+                        try:
+                            binance_data = json.loads(binance_response)
+                        except json.JSONDecodeError:
+                            continue
+                        try:
+                            kraken_data = json.loads(kraken_response)
+                        except json.JSONDecodeError:
+                            continue
 
-                while True:
-                    response = await ws.recv()
-                    data = json.loads(response)
-                    
-                    # Vérification des messages de type "event"
-                    if isinstance(data, dict) and "event" in data:
-                        continue
-                    
-                    # Vérification des mises à jour du carnet d'ordres
-                    if isinstance(data, list) and len(data) >= 4:
-                        pair_name = data[3]  # Le nom de la paire
-                        
-                        if "b" in data[1] or "a" in data[1]:  # Vérifie si on a des mises à jour bid/ask
-                            bid_price = float(data[1]["b"][0][0]) if "b" in data[1] else ORDER_BOOKS[pair_name]["bid_price"]
-                            ask_price = float(data[1]["a"][0][0]) if "a" in data[1] else ORDER_BOOKS[pair_name]["ask_price"]
-                            
-                            ORDER_BOOKS[pair_name] = {
-                                "bid_price": bid_price,
-                                "ask_price": ask_price
+                        # Process Binance data if it contains symbol + bid + ask information and update the order book.
+                        if isinstance(binance_data, dict) and "s" in binance_data and "b" in binance_data and "a" in binance_data:
+                            symbol = binance_data["s"]
+                            ORDER_BOOKS[symbol] = {
+                                "bid_price": float(binance_data["b"]),
+                                "ask_price": float(binance_data["a"])
                             }
-                            await send_order_book_update()
+
+                        # Process Kraken data if it is a list with sufficient information and ticker data is present.
+                        if isinstance(kraken_data, list) and len(kraken_data) > 2 and isinstance(kraken_data[1], dict):
+                            ticker_data = kraken_data[1]
+                            symbol = kraken_data[3]
+
+                            if "a" in ticker_data and "b" in ticker_data:
+                                if symbol == "XBT/USD":
+                                    ORDER_BOOKS["XBTUSD"] = {
+                                        "bid_price": float(ticker_data["b"][0]),
+                                        "ask_price": float(ticker_data["a"][0])
+                                    }
+                                elif symbol == "ETH/USD":
+                                    ORDER_BOOKS["ETHUSD"] = {
+                                        "bid_price": float(ticker_data["b"][0]),
+                                        "ask_price": float(ticker_data["a"][0])
+                                    }
+
+                        await send_order_book_update()
         except Exception as e:
-            print(f"Kraken WebSocket error: {e}")
+            logging.debug(f"Erreur lors de la récupération des données de marché : {e}")
             await asyncio.sleep(5)
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(fetch_binance_market_data())
-    asyncio.create_task(fetch_kraken_market_data())
+    # Creation and schedulong of asyncrhonous task to continuously fetch market data
+    asyncio.create_task(fetch_market_data())
 
 if __name__ == "__main__":
     import uvicorn
