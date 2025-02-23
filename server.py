@@ -1,13 +1,10 @@
-##################################################################################################
-# Librairies
-##################################################################################################
 from fastapi import FastAPI, HTTPException, Depends, Request, Header, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.security.api_key import APIKeyHeader
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-import logging 
+import logging
 import asyncio
 import json
 import websockets
@@ -18,9 +15,8 @@ from typing import Dict, Optional
 # FastAPI server initialisation
 ##################################################################################################
 app = FastAPI(
-    title = "TWAP Paper trading API using Binance or Kraken cryptocurrencies market data",
-    description=
-    """
+    title="TWAP Paper trading API using Binance or Kraken cryptocurrencies market data",
+    description="""
     API for TWAP (Time-Weighted Average Price) paper trading on the cryptocurrency market.
 
     # 1. What are TWAP Orders ?
@@ -47,48 +43,30 @@ app = FastAPI(
     # 6. Usage :
     - Simulates trading without risking real capital, ideal for testing strategies.
     """,
-    version = "1.0.0",
-    contact = {
+    version="1.0.0",
+    contact={
         "name": "Tania ADMANE, Antonin DEVALLAND, Fanny GAUDUCHEAU, Lauryn LETACONNOUX, Giovanni MANCHE, \
             Cherine RHELLAB, Ariane TRUSSANT",
         "email": "giovanni.manche@dauphine.eu"},
-        license_info={"name": "MIT"}
+    license_info={"name": "MIT"}
 )
 
 ##################################################################################################
-# API Key configuaration - authentication
+# Rate Limiting Configuration using SlowAPI
 ##################################################################################################
-API_KEY_NAME = "X-API-Key"
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Clés API et leurs infos (pour l'exemple, seules les clés sont utilisées pour l'identification)
-API_KEYS: Dict[str, Dict] = {
-    "TaniaEstKo": {
-        "client_name": "default_client",
-        # Les paramètres de rate limit custom ne sont plus utilisés ici
-    },
-    # D'autres clés peuvent être ajoutées
-}
-
+##################################################################################################
+# API Key configuration - authentication
+##################################################################################################
 AUTH_TOKEN = "TaniaEstKo"
 
-def get_auth_token(x_token: str = Header(...)) -> str:
+def get_auth_token(x_token: str = Header(...)):
     if x_token != AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return x_token
-
-##################################################################################################
-# Rate limiting using SlowAPI
-##################################################################################################
-def custom_rate_limit_key(request: Request) -> str:
-    api_key = request.headers.get(API_KEY_NAME)
-    if api_key and api_key in API_KEYS:
-        return f"apikey_{api_key}"
-    return request.client.host
-
-limiter = Limiter(key_func=custom_rate_limit_key)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 ##################################################################################################
 # Exchanges configuration 
@@ -135,14 +113,14 @@ connected_clients = []  # Websocket connected clients
 ##################################################################################################
 # API endpoints
 ##################################################################################################
+
 @app.get("/",
          tags = ['General'],
          summary = "API Root",
          description= "Returns a simple welcome message to confirm the API is running")
 @limiter.limit("20/minute")  # 20 requests per minute are allowed
 async def root(request: Request):
-    return {"message": "272 API"}
-
+    return {"message": "The Cryptocurrency TWAP paper trading API is running !"}
 
 @app.get("/exchanges",
          tags = ["Exchanges"],
@@ -248,7 +226,7 @@ async def get_order_status(token_id: str, request: Request):
     }
 )
 @limiter.limit("10/minute") # 10 requests per minute are allowed
-async def submit_twap_order(order_data: OrderBase, request: Request, execution_time: int = 600, interval: int = 60) -> dict:
+async def submit_twap_order(request: Request, order_data: OrderBase, execution_time: int = 600, interval: int = 60):
     if order_data.exchange not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=400, detail=f"Exchange '{order_data.exchange}' not supported")
     if order_data.symbol not in TRADING_PAIRS[order_data.exchange]:
@@ -261,31 +239,13 @@ async def submit_twap_order(order_data: OrderBase, request: Request, execution_t
 
     return {"message": "TWAP order accepted", "order_id": order.token_id, "order_details": order.dict()}
 
-@app.websocket("/ws")
-@limiter.limit("15/minute")
-async def websocket_endpoint(websocket: WebSocket) -> None:
-    """
-    Establishes a WebSocket connection to receive real-time updates of the order book. It :
-    - Accepts the WebSocket connection.
-    - Adds the client to the list of connected clients.
-    - Continuously sends the latest order book updates every second.
-    """
-    await websocket.accept()
-    connected_clients.append(websocket)
-
-    try:
-        while True:
-            await send_order_book_update()
-            await asyncio.sleep(1)
-    except:
-        connected_clients.remove(websocket)
-
 ##################################################################################################
 # TWAP execution engine 
 ##################################################################################################
-async def execute_twap_order(order: Order, execution_time: int, interval: int) -> None:
-    number_of_steps = execution_time // interval   # Number of steps = orders to be submitted
-    quantity_per_step = order.quantity / number_of_steps # Quantity per order
+
+async def execute_twap_order(order: Order, execution_time: int, interval: int):
+    number_of_steps = execution_time // interval    # Number of steps = orders to be submitted
+    quantity_per_step = order.quantity / number_of_steps    # Quantity per order
 
     for step in range(number_of_steps):
         # We wait for the specified interval before processing the next execution step
@@ -293,16 +253,16 @@ async def execute_twap_order(order: Order, execution_time: int, interval: int) -
 
         # Current market price 
         market_price = ORDER_BOOKS[order.symbol]["ask_price"] if order.order_type == "buy" else ORDER_BOOKS[order.symbol]["bid_price"]
-        logging.debug(f"TWAP - Step {step+1}: Market Price = {market_price}, Order Price = {order.price}")
-
+        print(f" TWAP - Step {step+1}: Market Price = {market_price}, Order Price = {order.price}")
+        
         # Order execution (agressive order is supposed)
         # At each time we update the information about the total order
         if (order.order_type == "buy" and market_price <= order.price) or (order.order_type == "sell" and market_price >= order.price):
             order.executed_quantity += quantity_per_step
             order.executions.append({"step": step + 1, "price": market_price, "quantity": quantity_per_step})
-            logging.debug(f"TWAP exécuté - Step {step+1}: {quantity_per_step} exécuté à {market_price}")
+            print(f"TWAP exécuté - Step {step+1}: {quantity_per_step} exécuté à {market_price}")
         else:
-            logging.debug(f"TWAP NON exécuté - Prix marché ({market_price}) > {order.price}")
+            print(f"TWAP NON exécuté - Prix marché ({market_price}) > {order.price}")
 
     order.status = "completed" if order.executed_quantity >= order.quantity else "partial"
 
@@ -321,9 +281,25 @@ async def send_order_book_update() -> None:
         except:
             connected_clients.remove(client)
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    Establishes a WebSocket connection to receive real-time updates of the order book. It :
+    - Accepts the WebSocket connection.
+    - Adds the client to the list of connected clients.
+    - Continuously sends the latest order book updates every second.
+    """
+    await websocket.accept()
+    connected_clients.append(websocket)
 
+    try:
+        while True:
+            await send_order_book_update()
+            await asyncio.sleep(1)
+    except:
+        connected_clients.remove(websocket)
 
-async def fetch_market_data() -> None:
+async def fetch_market_data():
     """
     Function that continuously fetch market data from Binance and Kraken
     Connection via Websocket
@@ -339,17 +315,18 @@ async def fetch_market_data() -> None:
                         "pair": ["XBT/USD", "ETH/USD"],
                         "subscription": {"name": "ticker"}
                     }))
-                    
+
                     # loop to continuously receive data
                     while True:
                         binance_response = await ws_binance.recv()
                         kraken_response = await ws_kraken.recv()
-                    
-                        # Passign the responses as JSON
+
+                        # Passing the responses as JSON
                         try:
                             binance_data = json.loads(binance_response)
                         except json.JSONDecodeError:
                             continue
+
                         try:
                             kraken_data = json.loads(kraken_response)
                         except json.JSONDecodeError:
@@ -365,8 +342,8 @@ async def fetch_market_data() -> None:
 
                         # Process Kraken data if it is a list with sufficient information and ticker data is present.
                         if isinstance(kraken_data, list) and len(kraken_data) > 2 and isinstance(kraken_data[1], dict):
-                            ticker_data = kraken_data[1]
-                            symbol = kraken_data[3]
+                            ticker_data = kraken_data[1]  # Le dictionnaire contenant les prix
+                            symbol = kraken_data[3]  # Le nom de la paire
 
                             if "a" in ticker_data and "b" in ticker_data:
                                 if symbol == "XBT/USD":
@@ -382,12 +359,12 @@ async def fetch_market_data() -> None:
 
                         await send_order_book_update()
         except Exception as e:
-            logging.debug(f"Erreur lors de la récupération des données de marché : {e}")
+            print(f"Erreur lors de la récupération des données de marché : {e}")
             await asyncio.sleep(5)
 
 @app.on_event("startup")
 async def startup_event():
-    # Creation and schedulong of asyncrhonous task to continuously fetch market data
+    # Creation and scheduling of asyncrhonous task to continuously fetch market data
     asyncio.create_task(fetch_market_data())
 
 if __name__ == "__main__":
