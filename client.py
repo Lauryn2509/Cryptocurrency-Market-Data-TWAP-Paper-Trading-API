@@ -6,35 +6,47 @@ import json
 import threading
 
 class TradingClient:
-    def __init__(self, exchange="binance", base_url="http://localhost:8000", auth_token="TaniaEstKo"):
-        self.exchange = exchange.lower()  # Stocke l'exchange choisi
+    def __init__(self, exchange="binance", base_url="http://localhost:8000", username="premium", password="CryptoTWAPpremium"):
+        self.exchange = exchange.lower()
         self.base_url = base_url
-        self.headers = {"x-token": auth_token}
-        self.latest_prices = {}  # Stocke les derniers prix reçus
-        self.last_printed_prices = {}  # Stocke les derniers prix affichés
+        self.username = username
+        self.password = password
+        self.access_token = self._get_access_token()  # Fetch access token on initialization
+        self.headers = {"Authorization": f"Bearer {self.access_token}"}  # Use Bearer token for authentication
+        self.latest_prices = {}
+        self.last_printed_prices = {}
+
+    def _get_access_token(self):
+        """Fetch access token using username and password."""
+        response = requests.post(
+            f"{self.base_url}/token",
+            data={"username": self.username, "password": self.password}
+        )
+        if response.status_code == 200:
+            return response.json()["access_token"]
+        else:
+            raise Exception("Failed to authenticate. Check username and password.")
 
     def fetch_exchanges(self):
-        response = requests.get(f"{self.base_url}/exchanges")
+        response = requests.get(f"{self.base_url}/exchanges", headers=self.headers)
         return response.json()
 
     def fetch_trading_pairs(self):
-        response = requests.get(f"{self.base_url}/exchanges/{self.exchange}/pairs")
+        response = requests.get(f"{self.base_url}/exchanges/{self.exchange}/pairs", headers=self.headers)
         return response.json()
 
     def submit_twap_order(self, symbol="BTCUSDT", quantity=10, execution_time=600, interval=60):
-        """
-        Envoie un ordre TWAP en utilisant le dernier prix du marché en temps réel.
-        """
+        """Submit a TWAP order using the latest real-time market price."""
         if symbol not in self.latest_prices:
-            print("Aucune donnée de marché disponible, impossible d'envoyer l'ordre.")
+            print("No market data available, unable to send the order.")
             return
 
         order_data = {
             "token_id": f"twap_{symbol.lower()}",
-            "exchange": self.exchange,  # Utilise l'exchange choisi
+            "exchange": self.exchange,
             "symbol": symbol,
             "quantity": quantity,
-            "price": self.latest_prices[symbol]["ask_price"],  # Utilise le dernier prix ask
+            "price": self.latest_prices[symbol]["ask_price"],
             "order_type": "buy"
         }
 
@@ -45,10 +57,11 @@ class TradingClient:
             params={"execution_time": execution_time, "interval": interval}
         )
 
-        print("\n Envoi de l'ordre TWAP...")
-        print(" Réponse du serveur :", response.json())
+        print("\n Sending TWAP order...")
+        print(" Server response:", response.json())
 
     def get_order_status(self, token_id: str):
+        """Fetch the status of a given order by its token_id."""
         response = requests.get(
             f"{self.base_url}/orders/{token_id}",
             headers=self.headers
@@ -56,15 +69,13 @@ class TradingClient:
         return response.json()
 
 async def listen_to_order_book(client, symbol="BTCUSDT"):
-    """
-    Se connecte au WebSocket du serveur et écoute les mises à jour du carnet d'ordres.
-    """
+    """Connect to the server's WebSocket and listen for order book updates."""
     uri = "ws://localhost:8000/ws"
 
     while True:
         try:
             async with websockets.connect(uri) as websocket:
-                print(f" Connecté au WebSocket du serveur ! En attente des mises à jour de {symbol}...")
+                print(f" Connected to the WebSocket server! Waiting for {symbol} updates...")
 
                 while True:
                     message = await websocket.recv()
@@ -74,7 +85,6 @@ async def listen_to_order_book(client, symbol="BTCUSDT"):
                         bid = data["order_book"][symbol]["bid_price"]
                         ask = data["order_book"][symbol]["ask_price"]
 
-                        # Vérifier si les prix ont changé avant d'afficher
                         if symbol not in client.last_printed_prices or \
                            client.last_printed_prices[symbol]["bid_price"] != bid or \
                            client.last_printed_prices[symbol]["ask_price"] != ask:
@@ -85,24 +95,22 @@ async def listen_to_order_book(client, symbol="BTCUSDT"):
                             print(f" {symbol} - Bid: {bid} | Ask: {ask}")
 
         except websockets.exceptions.ConnectionClosed:
-            print("⚠️ WebSocket déconnecté. Tentative de reconnexion...")
-            await asyncio.sleep(5)  # Attendre avant de réessayer
+            print("WebSocket disconnected. Attempting to reconnect...")
+            await asyncio.sleep(5)
 
 def start_websocket_listener(client, symbol="BTCUSDT"):
-    """
-    Démarre le WebSocket dans un thread séparé pour éviter de bloquer le programme principal.
-    """
+    """Start the WebSocket in a separate thread to avoid blocking the main program."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(listen_to_order_book(client, symbol))
 
 def main():
-    print("\n Sélectionnez un exchange :")
+    print("\n Select an exchange:")
     print("1 Binance")
     print("2 Kraken")
 
     while True:
-        choice = input("\n Entrez 1 ou 2 : ").strip()
+        choice = input("\n Enter 1 or 2: ").strip()
         if choice == "1":
             exchange = "binance"
             break
@@ -110,49 +118,49 @@ def main():
             exchange = "kraken"
             break
         else:
-            print("Choix invalide. Veuillez entrer 1 ou 2.")
+            print("Invalid choice. Please enter 1 or 2.")
 
-    print(f"\n Vous avez choisi {exchange.upper()} !")
+    print(f"\n You have selected {exchange.upper()}!")
 
     client = TradingClient(exchange=exchange)
 
-    # Récupérer les données de marché initiales
+    # Retrieve initial market data
     exchanges = client.fetch_exchanges()
     print("\n Supported Exchanges:", exchanges)
 
     trading_pairs = client.fetch_trading_pairs()
     print(f" Trading Pairs for {exchange}:", trading_pairs)
 
-    # L'utilisateur choisit la paire de trading
-    print("\n Sélectionnez une paire de trading :")
+    # User selects a trading pair
+    print("\n Select a trading pair:")
     for idx, pair in enumerate(trading_pairs["pairs"], start=1):
         print(f"{idx}. {pair}")
 
     while True:
         try:
-            pair_choice = int(input("\n Entrez le numéro de la paire souhaitée : ").strip())
+            pair_choice = int(input("\n Enter the number of the desired pair: ").strip())
             if 1 <= pair_choice <= len(trading_pairs["pairs"]):
                 symbol = trading_pairs["pairs"][pair_choice - 1]
                 break
             else:
-                print("⚠️ Choix invalide. Veuillez entrer un numéro valide.")
+                print("Invalid choice. Please enter a valid number.")
         except ValueError:
-            print("⚠️ Entrée invalide. Veuillez entrer un nombre.")
+            print("Invalid input. Please enter a number.")
 
-    print(f"\n Vous avez choisi de trader {symbol} sur {exchange.upper()} !")
+    print(f"\n You have selected to trade {symbol} on {exchange.upper()}!")
 
-    # Lancer l'écoute des prix du marché en temps réel dans un thread séparé
+    # Start listening to real-time market prices in a separate thread
     websocket_thread = threading.Thread(target=start_websocket_listener, args=(client, symbol), daemon=True)
     websocket_thread.start()
 
-    time.sleep(5)  # Attendre quelques secondes que les prix soient mis à jour
+    time.sleep(5)  # Wait a few seconds for prices to update
 
-    # Soumettre un ordre TWAP avec le prix en direct
+    # Submit a TWAP order with live price
     client.submit_twap_order(symbol=symbol, quantity=5, execution_time=300, interval=60)
 
-    # Suivi de l'ordre en temps réel
-    print("\n Suivi de l'ordre en temps réel...")
-    for _ in range(10):  # Vérifier pendant 1 minute
+    # Real-time order tracking
+    print("\n Real-time order tracking...")
+    for _ in range(10):  # Check for 1 minute
         order_status = client.get_order_status(f"twap_{symbol.lower()}")
         print(" Order Status:", order_status)
         time.sleep(6)
