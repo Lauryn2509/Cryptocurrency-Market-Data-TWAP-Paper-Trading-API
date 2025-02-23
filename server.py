@@ -1,6 +1,9 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, Header, WebSocket
+##################################################################################################
+# Librairies
+##################################################################################################
+from fastapi import FastAPI, HTTPException, Depends, Request, Header, WebSocket, status
 from fastapi.responses import JSONResponse
-from fastapi.security.api_key import APIKeyHeader
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -10,6 +13,9 @@ import json
 import websockets
 from pydantic import BaseModel, validator
 from typing import Dict, Optional
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from jose import jwt, JWTError
 
 ##################################################################################################
 # FastAPI server initialisation
@@ -51,22 +57,126 @@ app = FastAPI(
     license_info={"name": "MIT"}
 )
 
+
 ##################################################################################################
-# Rate Limiting Configuration using SlowAPI
+# Rate Limiting configuration using SlowAPI
 ##################################################################################################
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 ##################################################################################################
-# API Key configuration - authentication
+# Security / Authentication configiration
 ##################################################################################################
-AUTH_TOKEN = "TaniaEstKo"
+SECRET_KEY = "CryptoTWAPKey"  # For our purposes, no need to hide the key
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-def get_auth_token(x_token: str = Header(...)):
-    if x_token != AUTH_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return x_token
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Possible users
+users_db = {
+    "premium": {
+        "username": "premium",
+        "hashed_password": pwd_context.hash("CryptoTWAPpremium"),  # Hashed version of "TaniaEstKo"
+    }
+}
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# User and token models
+class User(BaseModel):
+    username: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+def verify_password(plain_password, hashed_password) -> bool:
+    """
+    Check if the plain password corresponds to the hash one
+    """
+    return pwd_context.verify(plain_password, hashed_password)
+
+# Authenticate user
+def authenticate_user(username: str, password: str):
+    """
+    Verify the identity of the user (if the id is in the database and passwords match)
+    """
+    user = users_db.get(username)
+    if not user or not verify_password(password, user["hashed_password"]):
+        return False
+    return User(username=user["username"])
+
+def create_access_token(username: str):
+    """
+    Generate a JWT token
+    """
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": username, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """
+    Décode le token JWT et récupère l'utilisateur correspondant.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return User(username=username)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# Token endpoint
+@app.post(
+    "/token",
+    response_model=Token,
+    tags=["Authentication"],
+    summary="Obtain an access token",
+    description="""
+    This endpoint allows a user to authenticate and obtain a JWT access token. 
+    1. The user provides a valid username and password.
+    2. If authentication is successful, a JWT token is returned.
+    3. This token must be included in the `Authorization` header as `Bearer <token>` for protected endpoints.
+
+    Request Body (form-data):
+    - `username` (str): The username of the user.
+    - `password` (str): The corresponding password.
+    """,
+    responses={
+        200: {
+            "description": "Successful authentication",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "access_token": "eyJhbGciOiJIUzI1NiIsInR5c...",
+                        "token_type": "bearer"
+                    }
+                }
+            }
+        },
+        401: {
+            "description": "Invalid credentials",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Incorrect username or password"}
+                }
+            }
+        }
+    }
+)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    OAuth2 authentication endpoint. Returns a JWT token if IDs are valid.
+    """
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+    access_token = create_access_token(user.username)
+    return {"access_token": access_token, "token_type": "bearer"}
 
 ##################################################################################################
 # Exchanges configuration 
@@ -118,14 +228,14 @@ connected_clients = []  # Websocket connected clients
          tags = ['General'],
          summary = "API Root",
          description= "Returns a simple welcome message to confirm the API is running")
-@limiter.limit("20/minute")  # 20 requests per minute are allowed
+@limiter.limit("20/minute")
 async def root(request: Request):
     return {"message": "The Cryptocurrency TWAP paper trading API is running !"}
 
 @app.get("/exchanges",
          tags = ["Exchanges"],
          summary = "List supported exchanges")
-@limiter.limit("15/minute") # 15 requests per minute are allowed
+@limiter.limit("15/minute")
 async def get_exchanges(request: Request):
     return {"exchanges": SUPPORTED_EXCHANGES}
 
@@ -141,14 +251,14 @@ async def get_exchanges(request: Request):
                 "description": "Exchange not found",
                 "content": {"application/json": {"example": {"detail": "Exchange 'unknown' not found"}}}
             }})
-@limiter.limit("15/minute") # 15 requests per minute are allowed
+@limiter.limit("15/minute")
 async def get_trading_pairs(exchange: str, request: Request):
     if exchange not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=404, detail=f"Exchange '{exchange}' not found")
     return {"pairs": TRADING_PAIRS[exchange]}
 
 @app.get("/orders", 
-         dependencies=[Depends(get_auth_token)],
+         dependencies=[Depends(get_current_user)],
          tags = ["Orders"],
          summary = "List all orders", 
          description = """
@@ -164,14 +274,14 @@ async def get_trading_pairs(exchange: str, request: Request):
             "content": {"application/json": {"example": {"detail": "Unauthorized"}}}
         }   
         })
-@limiter.limit("10/minute") # 15 requests per minute are allowed
+@limiter.limit("10/minute")
 async def list_orders(request: Request, token_id: Optional[str] = None):
     filtered_orders = [order for order in ORDERS if not token_id or order.token_id == token_id]
     return {"orders": filtered_orders}
 
 @app.get(
     "/orders/{token_id}",
-    dependencies=[Depends(get_auth_token)],
+    dependencies=[Depends(get_current_user)],
     tags=["Orders"],
     summary="Get order status",
     description="""
@@ -191,7 +301,7 @@ async def list_orders(request: Request, token_id: Optional[str] = None):
         }
     }
 )
-@limiter.limit("10/minute") # 10 requests per minute are allowed
+@limiter.limit("10/minute") 
 async def get_order_status(token_id: str, request: Request):
     order = next((order for order in ORDERS if order.token_id == token_id), None)
     if not order:
@@ -200,7 +310,7 @@ async def get_order_status(token_id: str, request: Request):
 
 @app.post(
     "/orders/twap",
-    dependencies=[Depends(get_auth_token)],
+    dependencies=[Depends(get_current_user)],
     tags=["Orders"],
     summary="Submit a TWAP order",
     description="""
@@ -225,7 +335,7 @@ async def get_order_status(token_id: str, request: Request):
         }
     }
 )
-@limiter.limit("10/minute") # 10 requests per minute are allowed
+@limiter.limit("10/minute")
 async def submit_twap_order(request: Request, order_data: OrderBase, execution_time: int = 600, interval: int = 60):
     if order_data.exchange not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=400, detail=f"Exchange '{order_data.exchange}' not supported")
@@ -242,9 +352,8 @@ async def submit_twap_order(request: Request, order_data: OrderBase, execution_t
 ##################################################################################################
 # TWAP execution engine 
 ##################################################################################################
-
 async def execute_twap_order(order: Order, execution_time: int, interval: int):
-    number_of_steps = execution_time // interval    # Number of steps = orders to be submitted
+    number_of_steps = execution_time // interval     # Number of steps = orders to be submitted
     quantity_per_step = order.quantity / number_of_steps    # Quantity per order
 
     for step in range(number_of_steps):
@@ -269,8 +378,7 @@ async def execute_twap_order(order: Order, execution_time: int, interval: int):
 ##################################################################################################
 # WebSocket price update
 ##################################################################################################
-
-async def send_order_book_update() -> None:
+async def send_order_book_update()-> None:
     """
     Function that aims to diffuse the trading book updates
     """
@@ -342,8 +450,8 @@ async def fetch_market_data():
 
                         # Process Kraken data if it is a list with sufficient information and ticker data is present.
                         if isinstance(kraken_data, list) and len(kraken_data) > 2 and isinstance(kraken_data[1], dict):
-                            ticker_data = kraken_data[1]  # Le dictionnaire contenant les prix
-                            symbol = kraken_data[3]  # Le nom de la paire
+                            ticker_data = kraken_data[1]
+                            symbol = kraken_data[3]
 
                             if "a" in ticker_data and "b" in ticker_data:
                                 if symbol == "XBT/USD":
