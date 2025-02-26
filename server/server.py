@@ -308,6 +308,79 @@ async def get_order_status(token_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Order with token_id '{token_id}' not found")
     return order.dict()
 
+# candlestick data
+@app.get("/klines/{exchange}/{symbol}", tags=["Klines"], summary="Get historical candlestick data",
+         description="Retrieves historical candlestick data for a given exchange and symbol.",
+         responses={
+             200: {
+                 "description": "Successful response",
+                 "content": {"application/json": {"example": {"klines": [["1609459200000", "33000.00", "33500.00", "32500.00", "33200.00", "1.500"]]}}}
+             },
+             400: {
+                 "description": "Invalid request",
+                 "content": {"application/json": {"example": {"detail": "Invalid interval or limit"}}}
+             },
+             404: {
+                 "description": "Exchange or symbol not found",
+                 "content": {"application/json": {"example": {"detail": "Exchange or symbol not found"}}}
+             }
+         })
+@limiter.limit("10/minute")
+async def get_klines(exchange: str, symbol: str, interval: str, limit: int, request: Request):
+    valid_intervals = {
+        "binance": ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"],
+        "kraken": ["1", "5", "15", "30", "60", "240", "1440", "10080", "21600"]
+    }
+
+    if exchange not in SUPPORTED_EXCHANGES:
+        raise HTTPException(status_code=404, detail="Exchange not found")
+    if symbol not in TRADING_PAIRS[exchange]:
+        raise HTTPException(status_code=404, detail="Symbol not found")
+    if interval not in valid_intervals[exchange]:
+        raise HTTPException(status_code=400, detail="Invalid interval")
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="Invalid limit. Limit must be between 1 and 1000.")
+
+    if exchange == "binance":
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    elif exchange == "kraken":
+        kraken_interval = valid_intervals["kraken"][valid_intervals["binance"].index(interval)]
+        url = f"https://api.kraken.com/0/public/OHLC?pair={symbol.replace('USD', 'ZUSD')}&interval={kraken_interval}&since=0"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Error fetching klines data")
+
+        data = response.json()
+        if exchange == "binance":
+            klines = [
+                [
+                    kline[0],  # Open time
+                    kline[1],  # Open
+                    kline[2],  # High
+                    kline[3],  # Low
+                    kline[4],  # Close
+                    kline[5]   # Volume
+                ]
+                for kline in data
+            ]
+        elif exchange == "kraken":
+            klines = [
+                [
+                    kline[0] * 1000,  # Open time (convert to milliseconds)
+                    kline[1],  # Open
+                    kline[2],  # High
+                    kline[3],  # Low
+                    kline[4],  # Close
+                    kline[6]   # Volume
+                ]
+                for kline in data["result"][list(data["result"].keys())[0]]
+            ]
+
+    return {"klines": klines}
+
+
 @app.post(
     "/orders/twap",
     dependencies=[Depends(get_current_user)],
