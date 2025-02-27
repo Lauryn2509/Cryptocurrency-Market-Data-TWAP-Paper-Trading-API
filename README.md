@@ -30,14 +30,16 @@ Cryptocurrency-Market-Data-TWAP-Paper-Trading-API/
 │   └── test_trading_client.py  # several unitary tests on the trading_client file
 ├── server/
 │   └── server.py               # API server, backbone of the project
-├── GUI.py                      # A GUI user-friendly implementation of the API
+├── GUI.py                      # An user-friendly GUI implementation of the API
 ├── simple_example.py           # A more basic but also more flexible implementation 
 ├── pyproject.toml
 └── README.md
 └── check_dependencies.py       # Code to verify if you have all the libraires needed to run the GUI
 ```
-**Please make sure to follow this architecture**. Failure to do so might result in unexpected errors.
-
+**Please make sure to follow this architecture**. Failure to do so might result in unexpected errors. For instance, if you run the GUI while the server is not in a "server" file, it will raise an error, since the line to start the server in the GUI is : 
+```python
+uvicorn.run("server.server:app", host="0.0.0.0", port=8000, reload=False)
+```
 ---
 
 ## 2. The Server
@@ -58,9 +60,9 @@ For the purposes of this project, valid usernames and passwords are "premium" an
 
 ### Functionalities and Endpoints
 - **Root Endpoint (`GET /`)**  
-  Returns a simple welcome message confirming that the API is running.
+  Returns a simple welcoming message confirming that the API is running.
 
-- **Exchanges Endpoints**:  
+- **Exchanges Endpoints** :  
   - `GET /exchanges` : Lists supported exchanges (Binance and Kraken).  
   - `GET /exchanges/{exchange}/pairs` : Returns trading pairs for the specified exchange. The format of the pairs is the Websocket API one, which is the same as the REST API format for Binance but different for Kraken.
   - `GET /exchanges/kraken/pairs_restpoint` : Returns trading pairs for Kraken at the REST API format.
@@ -68,7 +70,7 @@ For the purposes of this project, valid usernames and passwords are "premium" an
 - **Candlesticks endpoint** :
   - `GET /klines/{exchange}/{symbol}` : Returns klines for a given pair from a given exchange. **If you use Kraken, please make sure to use the REST API formatted pairs in your request**.
 
-- **Orders Endpoints**:  
+- **Orders Endpoints** (authentication is required) : 
   - `GET /orders`: Lists all orders (authentication required).  
   - `GET /orders/{token_id}`: Retrieves the status of a specific order by its unique token.  
   - `POST /orders/twap`: Submits a TWAP order.  
@@ -96,11 +98,11 @@ We used FastAPI, which automatically provides a Swagger UI documentation, and ha
 The client package provides a Python interface for interacting with the API. It is designed to simplify the process of authenticating, retrieving market data, and submitting orders.
 
 ### Description
-- **TradingClient Class**:  
-  This class handles:
-  - **Initialization**: Authenticates using credentials (defaults to "premium"/"CryptoTWAPpremium") and retrieves a JWT token.
-  - **Market Data**: Maintains a cache of latest market prices fetched via WebSocket.
-  - **Methods**:
+- **TradingClient Class** :  
+  This class handles :
+  - **Initialization** : Authenticates using credentials (defaults to "premium"/"CryptoTWAPpremium") and retrieves a JWT token.
+  - **Market Data** : Maintains a cache of latest market prices fetched via WebSocket.
+  - **Methods** :
     - `fetch_exchanges()`: Retrieves the list of supported exchanges.
     - `fetch_trading_pairs()`: Gets available trading pairs for the selected exchange, with special handling for Kraken.
     - `_fetch_kraken_websocket_pairs()`: Helper method to fetch Kraken pairs directly from Kraken API in WebSocket format.
@@ -191,9 +193,7 @@ The project is managed using Poetry. To install and set up the client package:
     ```bash
     poetry run pytest
     ```
-- **Mocking and Code Quality**:  
-  The tests use tools like `requests_mock` and `pytest-mock` for simulating API responses. Code quality is maintained using `black`, `flake8`, and `isort`.
-
+    
 ### Poetry Configuration
 - **pyproject.toml**:  
   This file includes the package metadata, dependencies (e.g., `requests`, `websockets`, `asyncio`), and development dependencies (e.g., `pytest`, `black`, `flake8`). It serves as the central configuration for building and packaging the project.
