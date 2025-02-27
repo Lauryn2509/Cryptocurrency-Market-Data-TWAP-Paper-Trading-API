@@ -4,6 +4,11 @@ import time
 import uvicorn
 import asyncio
 
+
+"""
+This example to run the server et submit a TWAP without using the GUI.
+You need to define the exchange and the pair / symbol (please make sure the pair is at the Websocket format)
+"""
 def run_server():
     """
     Run the FastAPI server using uvicorn.
@@ -17,20 +22,22 @@ server_thread.start()
 # Wait for the server to start
 time.sleep(2)
 
+exchange = "kraken"
+
 # Initialize the TradingClient
-client = TradingClient(exchange = "kraken", base_url="http://localhost:8000")
+client = TradingClient(exchange = exchange, base_url="http://localhost:8000")
 
 # Fetch and print supported exchanges
 exchanges = client.fetch_exchanges()
 print("Supported Exchanges:", exchanges)
 
 # Select an exchange (Binance/Kraken)
-exchange = "kraken"
+
 trading_pairs = client.fetch_trading_pairs()
 print(f"Trading Pairs for {exchange}:", trading_pairs)
 
 # Define the symbol for trading. 
-symbol = "XBTUSD"
+symbol = "1INCH/EUR"
 
 # Start the WebSocket listener in a separate thread with stop_event for cleanup
 stop_event = threading.Event()
@@ -46,7 +53,8 @@ client.submit_twap_order(symbol=symbol, quantity=5, execution_time=300, interval
 # Monitor the order status in real-time
 print("\nMonitoring the TWAP order status...")
 for _ in range(10):
-    order_status = client.get_order_status(f"twap_{symbol.lower()}")
+    # For Kraken, symbol is in a particular format (cur1/cur2), while twap_id is "twap_cur1_cur2"
+    order_status = client.get_order_status(f"twap_{symbol.lower().replace("/", "_")}")
     print("Order Status:", order_status)
     time.sleep(6)
 
