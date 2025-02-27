@@ -13,6 +13,7 @@ TWAP is a trading strategy used to execute large orders by breaking them into sm
 
 ### Aim of the API
 The primary goal of this API is to simulate cryptocurrency trading using TWAP orders without risking real capital. It achieves this by allowing users to:
+- Obtain trading pairs and klines of a given pair through REST Endpoint from Binance or Kraken
 - Monitor real-time cryptocurrency prices from Binance or Kraken (choice given to the user)
 - Execute TWAP orders for supported trading pairs
 - Track order execution progress
